@@ -46,6 +46,7 @@ The input template file in XLSX format is assumed to have:
 import re
 import abc
 import types
+import shutil
 import pathlib
 import argparse
 import textwrap
@@ -258,8 +259,19 @@ class BaseDocGenerator(abc.ABC):
         )
 
     @abc.abstractmethod
-    def generate_doc(self, out_path: str) -> None:
+    def generate_doc(self, out_path: pathlib.Path, force: bool = False) -> None:
         """Generate the entire document."""
+
+
+def _remove(path: pathlib.Path, force: bool = False) -> None:
+    if path.exists():
+        if force:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        else:
+            raise FileExistsError(path)
 
 
 class SingleFileDocGenerator(BaseDocGenerator):
@@ -273,16 +285,67 @@ class SingleFileDocGenerator(BaseDocGenerator):
 
         for section in self.model.iter_sections():
             parts.append("")
-            section_lines = self.formatter.format_section(
+            section_str = self.formatter.format_section(
                 section, fields=self.model.iter_fields(section), level=2
             )
-            parts.append(section_lines)
+            parts.append(section_str)
 
         return "\n".join(parts)
 
-    def generate_doc(self, out_path: str) -> None:
-        """Generate the string of the entire document."""
-        pathlib.Path(out_path).write_text(self.format_doc())
+    def generate_doc(self, out_path: pathlib.Path, force: bool = False) -> None:
+        """Generate the RST document."""
+        _remove(out_path, force)
+        out_path.write_text(self.format_doc())
+
+
+class SphinxDocGenerator(BaseDocGenerator):
+    @staticmethod
+    def _normalize_filename(name: str) -> str:
+        return name.replace(" ", "_")
+
+    def format_toctree(self, indent: int = 3) -> str:
+        lines = []
+        lines.append(".. toctree::")
+        # lines.append("   :maxdepth: 2")
+        lines.append("")
+        lines.extend(
+            f"{indent}{self._normalize_filename(section)}"
+            for section in self.model.iter_sections()
+        )
+        lines.append("")
+        return "\n".join(lines)
+
+    def format_index(self) -> str:
+        parts = []
+        parts.append(self.formatter.make_title(self.title, level=1))
+        parts.append("")
+        if self.preamble:
+            parts.append(self.preamble)
+            parts.append("")
+        parts.append(self.format_toctree())
+        return "\n".join(parts)
+
+    def format_doc(self, section: str) -> str:
+        return self.formatter.format_section(
+            section, fields=self.model.iter_fields(section), level=1
+        )
+
+    def generate_doc(self, out_path: pathlib.Path, force: bool = False) -> None:
+        """Generate the document.
+
+        Output is stored on RST file per section plus a sphinx index.rst file.
+        """
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        for section in self.model.iter_sections():
+            section_text = self.format_doc(section)
+            section_path = out_path / f"{self._normalize_filename(section)}.rst"
+            _remove(section_path, force)
+            section_path.write_text(section_text)
+
+        index_path = out_path / "index.rst"
+        _remove(index_path, force)
+        index_path.write_text(self.format_index())
 
 
 def title_from_source(source: pathlib.Path):
@@ -302,7 +365,10 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=pathlib.Path,
-        help="Output .rst file. Defaults to '<source-stem>.rst'.",
+        help=(
+            "Output path. Defaults to '<source-stem>.rst' for 'single-file' "
+            "generator and to <source-stem> for 'sphinx' generator."
+        ),
     )
     parser.add_argument(
         "--title",
@@ -310,6 +376,19 @@ def parse_args():
             "Document title. Defaults to a readable title from the source "
             "file name."
         ),
+    )
+    parser.add_argument(
+        "-g",
+        "--generator",
+        choices=("single-file", "sphinx"),
+        default="single-file",
+        help="Specify the documentation generator. Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Overwrite existing files or directories.",
     )
     parser.add_argument(
         "--skip-sheet",
@@ -359,7 +438,13 @@ def parse_args():
 def main():
     args = parse_args()
     source = args.source
-    output = args.output or pathlib.Path(f"{source.stem}.rst")
+    if args.generator == "sphinx":
+        generator_type = SphinxDocGenerator
+        output = args.output or pathlib.Path(source.stem)
+    else:
+        generator_type = SingleFileDocGenerator
+        output = args.output or pathlib.Path(f"{source.stem}.rst")
+
     doc_title = args.title or title_from_source(source)
     skip_sheets = {sheet.casefold() for sheet in args.skip_sheet}
     field_info_rows = FieldInfoRows(
@@ -375,10 +460,10 @@ def main():
     )
 
     preamble = f"Source file: ``{source.name}``"
-    generator = SingleFileDocGenerator(
+    generator = generator_type(
         model, doc_title, preamble=preamble, formatter=SimpleFormatter()
     )
-    generator.generate_doc(output)
+    generator.generate_doc(output, force=args.force)
 
     print(output.resolve())
 
