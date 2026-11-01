@@ -45,11 +45,13 @@ The input template file in XLSX format is assumed to have:
 
 import re
 import abc
+import types
 import argparse
+import textwrap
 import functools
 from typing import NamedTuple
 from pathlib import Path
-from collections.abc import Iterator, Collection
+from collections.abc import Mapping, Iterator, Collection
 
 import openpyxl
 
@@ -70,6 +72,7 @@ class FieldInfo(NamedTuple):
     validity_range: str
 
 
+MAX_LINE_LEN = 80
 DEFAULT_SKIP_SHEETS = frozenset({"README", "definitions"})
 DEFAULT_INFO_ROWS = FieldInfoRows()
 
@@ -139,6 +142,17 @@ class DataModel:
 
 
 class BaseFormatter(abc.ABC):
+    _title_spec: Mapping[int, tuple[str, bool]] = types.MappingProxyType(
+        {
+            1: ("#", True),
+            2: ("*", True),
+            3: ("=", False),
+            4: ("-", False),
+            5: ("^", False),
+            6: ('"', False),
+        }
+    )
+
     def __init__(
         self,
         model: DataModel,
@@ -147,90 +161,100 @@ class BaseFormatter(abc.ABC):
     ):
         self.model = model
         self.title = title
-        self.preamble: list[str] = preamble if preamble is not None else []
+        self.preamble: list[str] = (
+            list(preamble) if preamble is not None else []
+        )
+
+    @classmethod
+    def make_title(cls, title: str, level: int) -> list[str]:
+        """Return lines of a RST formatted title of teh specified level."""
+        char, overline = cls._title_spec[level]
+        underline_str = f"{char * len(title)}"
+        lines = [underline_str] if overline else []
+        lines.extend([title, f"{char * len(title)}"])
+        return lines
 
     @staticmethod
-    def make_title(title, char) -> list[str]:
-        return [
-            title,
-            char * max(len(title), 3),            # "",
-        ]
 
     @staticmethod
-    def literal_block(text):
+    def literal_block(text, indent: int | str = 4):
+        """Generate lines of a RST literal block."""
+        prefix = indent if isinstance(indent, str) else " " * indent
         lines = []
-
-        if not text:
-            return lines
         lines.append("::")
         lines.append("")
-        for raw_line in text.splitlines():
-            lines.append(f"   {raw_line}" if raw_line else "   ")
+        lines.extend(textwrap.indent(text, prefix=prefix).splitlines())
 
         return lines
 
     @staticmethod
-    def field_block(label, value):
-        lines = []
-        if value:
-            lines.append(f":{label}: {value}")
-        return lines
+    def field_block(label: str, value) -> list[str]:
+        return [f":{label}: {value}"] if value else []
 
     @abc.abstractmethod
     def format_doc(self) -> list[str]:
-        pass
+        """Generate lines of teh entire document."""
 
     def generate_doc(self) -> str:
-        lines = self.format_doc()
-        data = "\n".join(lines).rstrip() + "\n"
-        return data
+        """Generate sthe string cof the entire document."""
+        return "\n".join(self.format_doc())
 
 
 class SinglefileFormatter(BaseFormatter):
-    def format_field(self, field_info: FieldInfo) -> list[str]:
+    def format_field(self, field_info: FieldInfo, level: int = 1) -> list[str]:
         lines = []
 
         column_title = field_info.title or field_info.field_id
-        lines.extend(self.make_title(column_title, "~"))
+        lines.extend(self.make_title(column_title, level))
+        lines.append("")
         lines.extend(self.field_block("Field name", field_info.field_id))
         lines.extend(self.field_block("Required", field_info.mandatory))
+        lines.append("")
 
         if field_info.description:
             lines.append("")
-            lines.extend(self.make_title("Description", "^"))
+            lines.extend(self.make_title("Description", level + 1))
             lines.append("")
-            lines.extend(self.literal_block(field_info.description))
+
+            for paragraph in re.split(
+                r"\n\W*\n", field_info.description, flags=re.MULTILINE
+            ):
+                lines.extend(textwrap.wrap(paragraph, MAX_LINE_LEN))
+
+            lines.append("")
 
         if field_info.validity_range:
             lines.append("")
-            lines.extend(self.make_title("Constraints", "^"))
+            lines.extend(self.make_title("Constraints", level + 1))
             lines.append("")
             lines.extend(self.literal_block(field_info.validity_range))
+            lines.append("")
 
         return lines
 
-    def format_section(self, section: str) -> list[str]:
+    def format_section(self, title: str, level: int = 1) -> list[str]:
         lines = []
 
-        lines.extend(self.make_title(section, "-"))
+        lines.extend(self.make_title(title, level))
         lines.append("")
 
-        for field_info in self.model.iter_fields(section):
-            lines.extend(self.format_field(field_info))
+        for field_info in self.model.iter_fields(title):
+            lines.extend(self.format_field(field_info, level=level + 1))
             lines.append("")
 
         return lines
 
     def format_doc(self) -> list[str]:
         lines = []
-        lines.extend(self.make_title(self.title, "="))
+        lines.extend(self.make_title(self.title, 1))
+        lines.append("")
         if self.preamble:
-            lines.append("")
             lines.extend(self.preamble)
             lines.append("")
 
         for section in self.model.iter_sections():
-            section_lines = self.format_section(section)
+            lines.append("")
+            section_lines = self.format_section(section, level=2)
             lines.extend(section_lines)
 
         return lines
