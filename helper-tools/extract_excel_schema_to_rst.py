@@ -46,11 +46,11 @@ The input template file in XLSX format is assumed to have:
 import re
 import abc
 import types
+import pathlib
 import argparse
 import textwrap
 import functools
 from typing import NamedTuple
-from pathlib import Path
 from collections.abc import Mapping, Iterator, Collection
 
 import openpyxl
@@ -114,10 +114,10 @@ class DataModel:
     def iter_fields(
         self,
         section: str,
-        info_rows: FieldInfoRows | None = None,
+        info: FieldInfoRows | None = None,
     ) -> Iterator[FieldInfo]:
         info_rows: FieldInfoRows = (
-            info_rows if info_rows is not None else self._field_info_rows
+            info if info is not None else self._field_info_rows
         )
 
         ws = self._wb[section]
@@ -141,7 +141,7 @@ class DataModel:
             )
 
 
-class BaseFormatter(abc.ABC):
+class BaseFormatter:
     _title_spec: Mapping[int, tuple[str, bool]] = types.MappingProxyType(
         {
             1: ("#", True),
@@ -153,21 +153,9 @@ class BaseFormatter(abc.ABC):
         }
     )
 
-    def __init__(
-        self,
-        model: DataModel,
-        title: str,
-        preamble: Collection[str] | None = None,
-    ):
-        self.model = model
-        self.title = title
-        self.preamble: list[str] = (
-            list(preamble) if preamble is not None else []
-        )
-
     @classmethod
     def make_title(cls, title: str, level: int) -> list[str]:
-        """Return lines of a RST formatted title of teh specified level."""
+        """Return lines of a RST formatted title of the specified level."""
         char, overline = cls._title_spec[level]
         underline_str = f"{char * len(title)}"
         lines = [underline_str] if overline else []
@@ -189,19 +177,34 @@ class BaseFormatter(abc.ABC):
 
     @staticmethod
     def field_block(label: str, value) -> list[str]:
-        return [f":{label}: {value}"] if value else []
+        return [f":{label}: {value}"]
 
     @abc.abstractmethod
-    def format_doc(self) -> list[str]:
-        """Generate lines of teh entire document."""
-
-    def generate_doc(self) -> str:
-        """Generate sthe string cof the entire document."""
-        return "\n".join(self.format_doc())
+    def format_section(
+        self, title: str, fields: Iterator[FieldInfo], level: int = 1
+    ) -> list[str]:
+        """Generate lines of a RST section."""
 
 
-class SinglefileFormatter(BaseFormatter):
-    def format_field(self, field_info: FieldInfo, level: int = 1) -> list[str]:
+class SimpleFormatter(BaseFormatter):
+    def format_description(self, description: str, level: int = 3) -> list[str]:
+        lines = []
+        lines.extend(self.make_title("Description", level))
+        lines.append("")
+        for paragraph in re.split(r"\n\W*\n", description, flags=re.MULTILINE):
+            lines.extend(textwrap.wrap(paragraph, MAX_LINE_LEN))
+        return lines
+
+    def format_validity_range(
+        self, validity_range: str, level: int = 3
+    ) -> list[str]:
+        lines = []
+        lines.extend(self.make_title("Constraints", level))
+        lines.append("")
+        lines.extend(self.literal_block(validity_range))
+        return lines
+
+    def format_field(self, field_info: FieldInfo, level: int = 2) -> list[str]:
         lines = []
 
         column_title = field_info.title or field_info.field_id
@@ -213,40 +216,63 @@ class SinglefileFormatter(BaseFormatter):
 
         if field_info.description:
             lines.append("")
-            lines.extend(self.make_title("Description", level + 1))
-            lines.append("")
-
-            for paragraph in re.split(
-                r"\n\W*\n", field_info.description, flags=re.MULTILINE
-            ):
-                lines.extend(textwrap.wrap(paragraph, MAX_LINE_LEN))
-
+            lines.extend(
+                self.format_description(field_info.description, level + 1)
+            )
             lines.append("")
 
         if field_info.validity_range:
             lines.append("")
-            lines.extend(self.make_title("Constraints", level + 1))
-            lines.append("")
-            lines.extend(self.literal_block(field_info.validity_range))
+            lines.extend(
+                self.format_validity_range(field_info.validity_range, level + 1)
+            )
             lines.append("")
 
         return lines
 
-    def format_section(self, title: str, level: int = 1) -> list[str]:
+    def format_section(
+        self, title: str, fields: Iterator[FieldInfo], level: int = 1
+    ) -> list[str]:
+        """Generate lines of a RST section."""
         lines = []
 
         lines.extend(self.make_title(title, level))
         lines.append("")
 
-        for field_info in self.model.iter_fields(title):
+        for field_info in fields:
             lines.extend(self.format_field(field_info, level=level + 1))
             lines.append("")
 
         return lines
 
-    def format_doc(self) -> list[str]:
+
+class BaseDocGenerator(abc.ABC):
+    def __init__(
+        self,
+        model: DataModel,
+        title: str,
+        *,
+        preamble: Collection[str] | None = None,
+        formatter: BaseFormatter | None = None,
+    ):
+        self.model = model
+        self.title = title
+        self.preamble: list[str] = (
+            list(preamble) if preamble is not None else []
+        )
+        self.formatter = (
+            formatter if formatter is not None else SimpleFormatter()
+        )
+
+    @abc.abstractmethod
+    def generate_doc(self, out_path: str) -> None:
+        """Generate the entire document."""
+
+
+class SingleFileDocGenerator(BaseDocGenerator):
+    def _format_doc(self) -> list[str]:
         lines = []
-        lines.extend(self.make_title(self.title, 1))
+        lines.extend(self.formatter.make_title(self.title, 1))
         lines.append("")
         if self.preamble:
             lines.extend(self.preamble)
@@ -254,13 +280,21 @@ class SinglefileFormatter(BaseFormatter):
 
         for section in self.model.iter_sections():
             lines.append("")
-            section_lines = self.format_section(section, level=2)
+            section_lines = self.formatter.format_section(
+                section, fields=self.model.iter_fields(section), level=2
+            )
             lines.extend(section_lines)
 
         return lines
 
+    def generate_doc(self, out_path: str) -> None:
+        """Generate the string of the entire document."""
+        lines = self._format_doc()
+        data = "\n".join(lines)
+        pathlib.Path(out_path).write_text(data)
 
-def title_from_source(source: Path):
+
+def title_from_source(source: pathlib.Path):
     stem = source.stem
     stem = re.sub(r"_v\d+(?:\.\d+)*$", "", stem)
     stem = stem.replace("_submission_template", " Submission Template")
@@ -273,10 +307,10 @@ def title_from_source(source: Path):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help="Input XSLX file.")
+    parser.add_argument("source", type=pathlib.Path, help="Input XSLX file.")
     parser.add_argument(
         "--output",
-        type=Path,
+        type=pathlib.Path,
         help="Output .rst file. Defaults to '<source-stem>.rst'.",
     )
     parser.add_argument(
@@ -334,7 +368,7 @@ def parse_args():
 def main():
     args = parse_args()
     source = args.source
-    output = args.output or Path(f"{source.stem}.rst")
+    output = args.output or pathlib.Path(f"{source.stem}.rst")
     doc_title = args.title or title_from_source(source)
     skip_sheets = {sheet.casefold() for sheet in args.skip_sheet}
     field_info_rows = FieldInfoRows(
@@ -350,10 +384,11 @@ def main():
     )
 
     preamble = [f"Source file: ``{source.name}``"]
-    formatter = SinglefileFormatter(model, doc_title, preamble=preamble)
-    data = formatter.generate_doc()
+    generator = SingleFileDocGenerator(
+        model, doc_title, preamble=preamble, formatter=SimpleFormatter()
+    )
+    generator.generate_doc(output)
 
-    output.write_text(data, encoding="utf-8")
     print(output.resolve())
 
 
