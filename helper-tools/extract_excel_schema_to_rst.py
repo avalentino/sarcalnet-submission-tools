@@ -154,96 +154,91 @@ class BaseFormatter:
     )
 
     @classmethod
-    def make_title(cls, title: str, level: int) -> list[str]:
+    def make_title(cls, title: str, level: int) -> str:
         """Return lines of a RST formatted title of the specified level."""
         char, overline = cls._title_spec[level]
         underline_str = f"{char * len(title)}"
         lines = [underline_str] if overline else []
         lines.extend([title, f"{char * len(title)}"])
-        return lines
+        return "\n".join(lines)
 
     @staticmethod
-
-    @staticmethod
-    def literal_block(text, indent: int | str = 4):
+    def literal_block(text, indent: int | str = 4) -> str:
         """Generate lines of a RST literal block."""
         prefix = indent if isinstance(indent, str) else " " * indent
         lines = []
         lines.append("::")
         lines.append("")
         lines.extend(textwrap.indent(text, prefix=prefix).splitlines())
-
-        return lines
+        return "\n".join(lines)
 
     @staticmethod
-    def field_block(label: str, value) -> list[str]:
-        return [f":{label}: {value}"]
+    def field_block(label: str, value) -> str:
+        return f":{label}: {value}"
 
     @abc.abstractmethod
     def format_section(
         self, title: str, fields: Iterator[FieldInfo], level: int = 1
-    ) -> list[str]:
+    ) -> str:
         """Generate lines of a RST section."""
 
 
 class SimpleFormatter(BaseFormatter):
-    def format_description(self, description: str, level: int = 3) -> list[str]:
-        lines = []
-        lines.extend(self.make_title("Description", level))
-        lines.append("")
+    def format_description(self, description: str, level: int = 3) -> str:
+        parts = []
+        parts.append(self.make_title("Description", level))
+        parts.append("")
         for paragraph in re.split(r"\n\W*\n", description, flags=re.MULTILINE):
-            lines.extend(textwrap.wrap(paragraph, MAX_LINE_LEN))
-        return lines
+            parts.extend(textwrap.wrap(paragraph, MAX_LINE_LEN))
+        return "\n".join(parts)
 
-    def format_validity_range(
-        self, validity_range: str, level: int = 3
-    ) -> list[str]:
-        lines = []
-        lines.extend(self.make_title("Constraints", level))
-        lines.append("")
-        lines.extend(self.literal_block(validity_range))
-        return lines
+    def format_validity_range(self, validity_range: str, level: int = 3) -> str:
+        parts = []
+        parts.append(self.make_title("Constraints", level))
+        parts.append("")
+        parts.append(self.literal_block(validity_range))
+        return "\n".join(parts)
 
-    def format_field(self, field_info: FieldInfo, level: int = 2) -> list[str]:
-        lines = []
+    def format_field(self, field_info: FieldInfo, level: int = 2) -> str:
+        parts = []
 
         column_title = field_info.title or field_info.field_id
-        lines.extend(self.make_title(column_title, level))
-        lines.append("")
-        lines.extend(self.field_block("Field name", field_info.field_id))
-        lines.extend(self.field_block("Required", field_info.mandatory))
-        lines.append("")
+        parts.append(self.make_title(column_title, level))
+        parts.append("")
+        parts.append(self.field_block("Field name", field_info.field_id))
+        parts.append(self.field_block("Required", field_info.mandatory))
+        parts.append("")
 
         if field_info.description:
-            lines.append("")
-            lines.extend(
+            parts.append("")
+            parts.append(
                 self.format_description(field_info.description, level + 1)
             )
-            lines.append("")
+            parts.append("")
 
         if field_info.validity_range:
-            lines.append("")
-            lines.extend(
+            parts.append("")
+            parts.append(
                 self.format_validity_range(field_info.validity_range, level + 1)
             )
-            lines.append("")
+            parts.append("")
 
-        return lines
+        return "\n".join(parts)
 
     def format_section(
         self, title: str, fields: Iterator[FieldInfo], level: int = 1
-    ) -> list[str]:
+    ) -> str:
         """Generate lines of a RST section."""
-        lines = []
+        parts = []
 
-        lines.extend(self.make_title(title, level))
-        lines.append("")
+        parts.append(self.make_title(title, level))
+        parts.append("")
 
         for field_info in fields:
-            lines.extend(self.format_field(field_info, level=level + 1))
-            lines.append("")
+            parts.append(self.format_field(field_info, level=level + 1))
+            parts.append("")
 
-        return lines
+        return "\n".join(parts)
 
 
 class BaseDocGenerator(abc.ABC):
@@ -252,14 +247,12 @@ class BaseDocGenerator(abc.ABC):
         model: DataModel,
         title: str,
         *,
-        preamble: Collection[str] | None = None,
+        preamble: str | None = None,
         formatter: BaseFormatter | None = None,
     ):
         self.model = model
         self.title = title
-        self.preamble: list[str] = (
-            list(preamble) if preamble is not None else []
-        )
+        self.preamble = preamble
         self.formatter = (
             formatter if formatter is not None else SimpleFormatter()
         )
@@ -270,28 +263,26 @@ class BaseDocGenerator(abc.ABC):
 
 
 class SingleFileDocGenerator(BaseDocGenerator):
-    def _format_doc(self) -> list[str]:
-        lines = []
-        lines.extend(self.formatter.make_title(self.title, 1))
-        lines.append("")
+    def format_doc(self) -> str:
+        parts = []
+        parts.append(self.formatter.make_title(self.title, 1))
+        parts.append("")
         if self.preamble:
-            lines.extend(self.preamble)
-            lines.append("")
+            parts.append(self.preamble)
+            parts.append("")
 
         for section in self.model.iter_sections():
-            lines.append("")
+            parts.append("")
             section_lines = self.formatter.format_section(
                 section, fields=self.model.iter_fields(section), level=2
             )
-            lines.extend(section_lines)
+            parts.append(section_lines)
 
-        return lines
+        return "\n".join(parts)
 
     def generate_doc(self, out_path: str) -> None:
         """Generate the string of the entire document."""
-        lines = self._format_doc()
-        data = "\n".join(lines)
-        pathlib.Path(out_path).write_text(data)
+        pathlib.Path(out_path).write_text(self.format_doc())
 
 
 def title_from_source(source: pathlib.Path):
@@ -383,7 +374,7 @@ def main():
         source, skip_sheet=skip_sheets, field_info_rows=field_info_rows
     )
 
-    preamble = [f"Source file: ``{source.name}``"]
+    preamble = f"Source file: ``{source.name}``"
     generator = SingleFileDocGenerator(
         model, doc_title, preamble=preamble, formatter=SimpleFormatter()
     )
