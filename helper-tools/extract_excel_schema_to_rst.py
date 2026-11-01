@@ -74,8 +74,22 @@ class FieldInfo(NamedTuple):
 
 
 MAX_LINE_LEN = 80
-DEFAULT_SKIP_SHEETS = frozenset({"README", "definitions"})
+DEFAULT_SKIP_SHEETS = frozenset(
+    {
+        "README",
+        "unavailability (optional)",
+        "definitions",
+    }
+)
 DEFAULT_INFO_ROWS = FieldInfoRows()
+SHEETS_NAME_TO_TITLE: dict[str, str] = {
+    "README": "README",
+    "site": "Calibration Sites",
+    "cr": "Corner Reflectors",
+    "survey": "Calibration Site Surveys",
+    "unavailability (optional)": "Site unavailability",
+    "definitions": "Definitions",
+}
 
 
 class DataModel:
@@ -232,6 +246,7 @@ class SimpleFormatter(BaseFormatter):
         """Generate lines of a RST section."""
         parts = []
 
+        title = SHEETS_NAME_TO_TITLE[title]
         parts.append(self.make_title(title, level))
         parts.append("")
 
@@ -301,16 +316,19 @@ class SingleFileDocGenerator(BaseDocGenerator):
 class SphinxDocGenerator(BaseDocGenerator):
     @staticmethod
     def _normalize_filename(name: str) -> str:
-        return name.replace(" ", "_")
+        name = re.sub(r"\s*\(.*\)\s*", "", name)
+        return name.lower().replace(" ", "_")
 
-    def format_toctree(self, indent: int = 3) -> str:
+    def format_toctree(self, indent: str | int = 3) -> str:
+        prefix = " " * indent if isinstance(indent, int) else indent
         lines = []
         lines.append(".. toctree::")
         # lines.append("   :maxdepth: 2")
         lines.append("")
         lines.extend(
-            f"{indent}{self._normalize_filename(section)}"
-            for section in self.model.iter_sections()
+            f"{prefix}"
+            f"{self._normalize_filename(SHEETS_NAME_TO_TITLE.get(sect, sect))}"
+            for sect in self.model.iter_sections()
         )
         lines.append("")
         return "\n".join(lines)
@@ -339,7 +357,10 @@ class SphinxDocGenerator(BaseDocGenerator):
 
         for section in self.model.iter_sections():
             section_text = self.format_doc(section)
-            section_path = out_path / f"{self._normalize_filename(section)}.rst"
+            section_name = self._normalize_filename(
+                SHEETS_NAME_TO_TITLE.get(section, section)
+            )
+            section_path = out_path / f"{section_name}.rst"
             _remove(section_path, force)
             section_path.write_text(section_text)
 
